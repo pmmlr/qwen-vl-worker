@@ -14,16 +14,13 @@ ENV ATTN_BACKEND=flash-attn
 
 WORKDIR /app
 
-# Clone TRELLIS
-RUN git clone --recurse-submodules https://github.com/microsoft/TRELLIS.git /tmp/trellis
-
-# Install all inference deps using setup.sh
-RUN cd /tmp/trellis && \
+# Install TRELLIS + deps
+RUN git clone --recurse-submodules https://github.com/microsoft/TRELLIS.git /tmp/trellis && \
+    cd /tmp/trellis && \
     bash -c '. ./setup.sh --basic --flash-attn --diffoctreerast --spconv --mipgaussian --kaolin --nvdiffrast' && \
     pip install . && \
     rm -rf /tmp/trellis
 
-# Install runpod
 RUN pip install --no-cache-dir runpod Pillow
 
 COPY handler.py .
