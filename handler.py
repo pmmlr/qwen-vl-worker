@@ -5,7 +5,7 @@ from PIL import Image
 os.environ["SPCONV_ALGO"] = "native"
 os.environ["ATTN_BACKEND"] = "flash-attn"
 
-MODEL_ID = "microsoft/TRELLIS-image-large"
+MODEL_ID = os.environ.get("MODEL_ID", os.environ.get("MODEL_NAME", "microsoft/TRELLIS-image-large"))
 pipeline = None
 
 def load_pipeline():
