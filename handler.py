@@ -1,15 +1,15 @@
 import runpod
-import os, base64, io, torch
+import os, base64, io, torch, tempfile
 from PIL import Image
 
+os.environ["SPCONV_ALGO"] = "native"
+os.environ["ATTN_BACKEND"] = "flash-attn"
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-MODEL_ID = os.environ.get("MODEL_NAME", "Qwen/Qwen2-VL-7B-Instruct")
+MODEL_ID = os.environ.get("MODEL_ID", "microsoft/TRELLIS-image-large")
 HF_CACHE = "/runpod-volume/huggingface-cache/hub"
-model = None
-processor = None
-
+pipeline = None
 
 def resolve_snapshot_path(model_id):
     org, name = model_id.split("/", 1)
@@ -25,48 +25,53 @@ def resolve_snapshot_path(model_id):
     vers = sorted(d for d in os.listdir(snaps) if os.path.isdir(os.path.join(snaps, d)))
     return os.path.join(snaps, vers[0])
 
-
-def load_model():
-    global model, processor
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+def load_pipeline():
+    global pipeline
+    from trellis.pipelines import TrellisImageTo3DPipeline
+    from trellis.utils import postprocessing_utils
     path = resolve_snapshot_path(MODEL_ID)
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        path, torch_dtype=torch.bfloat16, device_map="auto", local_files_only=True)
-    processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-
+    pipeline = TrellisImageTo3DPipeline.from_pretrained(path)
+    pipeline.cuda()
 
 def handler(job):
-    global model, processor
-    if model is None:
-        load_model()
+    global pipeline
+    if pipeline is None:
+        load_pipeline()
 
+    from trellis.utils import postprocessing_utils
+    
     inp = job.get("input", {}) or {}
     img_b64 = inp.get("image", "")
-    question = inp.get("question", "Describe this image.")
-    max_tokens = int(inp.get("max_tokens", 512))
-    temperature = float(inp.get("temperature", 0.0))
+    seed = int(inp.get("seed", 1))
+    simplify = float(inp.get("simplify", 0.95))
+    texture_size = int(inp.get("texture_size", 1024))
 
     if not img_b64:
         return {"status": "error", "error": "No 'image' (base64) provided"}
 
     img = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert("RGB")
-    from qwen_vl_utils import process_vision_info
 
-    messages = [{"role": "user", "content": [
-        {"type": "image", "image": img},
-        {"type": "text", "text": question},
-    ]}]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(messages)
-    inputs = processor(text=[text], images=image_inputs, videos=video_inputs,
-                       padding=True, return_tensors="pt").to(model.device)
+    outputs = pipeline.run(img, seed=seed)
 
-    gen = model.generate(**inputs, max_new_tokens=max_tokens,
-                         temperature=temperature if temperature > 0 else None,
-                         do_sample=temperature > 0)
-    trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, gen)]
-    out = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    return {"status": "success", "output": out}
+    gs = outputs.get("gaussian", [None])[0]
+    mesh = outputs.get("mesh", [None])[0]
 
+    if mesh is None:
+        return {"status": "error", "error": "No mesh generated"}
+
+    glb = postprocessing_utils.to_glb(gs, mesh, simplify=simplify, texture_size=texture_size)
+    
+    with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tmp:
+        glb.export(tmp.name)
+        with open(tmp.name, "rb") as f:
+            glb_b64 = base64.b64encode(f.read()).decode()
+        os.unlink(tmp.name)
+
+    return {
+        "status": "success",
+        "output": glb_b64,
+        "format": "glb",
+        "seed": seed,
+    }
 
 runpod.serverless.start({"handler": handler})

@@ -1,6 +1,2 @@
-runpod>=1.6.2
-torch>=2.4.0
-transformers>=4.45.0
-accelerate>=0.25.0
-qwen-vl-utils
+runpod
 Pillow
